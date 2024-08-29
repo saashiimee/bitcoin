@@ -281,6 +281,7 @@ void Shutdown(NodeContext& node)
     /// module was initialized.
     util::ThreadRename("shutoff");
     if (node.mempool) node.mempool->AddTransactionsUpdated(1);
+    if (node.mempool_candidate) node.mempool_candidate->AddTransactionsUpdated(1);
 
     StopHTTPRPC();
     StopREST();
@@ -313,6 +314,10 @@ void Shutdown(NodeContext& node)
 
     if (node.mempool && node.mempool->GetLoadTried() && ShouldPersistMempool(*node.args)) {
         DumpMempool(*node.mempool, MempoolPath(*node.args));
+    }
+
+    if (node.mempool_candidate && ShouldPersistMempool(*node.args)) {
+        DumpMempool(*node.mempool_candidate, MempoolPath(*node.args, true));
     }
 
     // Drop transactions we were still watching, record fee estimations and unregister
@@ -376,6 +381,7 @@ void Shutdown(NodeContext& node)
         node.validation_signals->UnregisterAllValidationInterfaces();
     }
     node.mempool.reset();
+    node.mempool_candidate.reset();
     node.fee_estimator.reset();
     node.chainman.reset();
     node.validation_signals.reset();
@@ -1124,7 +1130,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 {
     const ArgsManager& args = *Assert(node.args);
     const CChainParams& chainparams = Params();
-
+        
     auto opt_max_upload = ParseByteUnits(args.GetArg("-maxuploadtarget", DEFAULT_MAX_UPLOAD_TARGET), ByteUnit::M);
     if (!opt_max_upload) {
         return InitError(strprintf(_("Unable to parse -maxuploadtarget: '%s'"), args.GetArg("-maxuploadtarget", "")));
@@ -1518,6 +1524,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     LogPrintf("* Using %.1f MiB for chain state database\n", cache_sizes.coins_db * (1.0 / 1024 / 1024));
 
     assert(!node.mempool);
+    assert(!node.mempool_candidate);
     assert(!node.chainman);
 
     CTxMemPool::Options mempool_opts{
@@ -1535,6 +1542,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     for (bool fLoaded = false; !fLoaded && !ShutdownRequested(node);) {
         bilingual_str mempool_error;
         node.mempool = std::make_unique<CTxMemPool>(mempool_opts, mempool_error);
+        node.mempool_candidate = std::make_unique<CTxMemPool>(mempool_opts, mempool_error);
         if (!mempool_error.empty()) {
             return InitError(mempool_error);
         }
@@ -1564,6 +1572,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
         node::ChainstateLoadOptions options;
         options.mempool = Assert(node.mempool.get());
+        options.mempool_candidate = Assert(node.mempool_candidate.get());
         options.wipe_block_tree_db = do_reindex;
         options.wipe_chainstate_db = do_reindex || do_reindex_chainstate;
         options.prune = chainman.m_blockman.IsPruneMode();
@@ -1639,7 +1648,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     assert(!node.peerman);
     node.peerman = PeerManager::make(*node.connman, *node.addrman,
                                      node.banman.get(), chainman,
-                                     *node.mempool, peerman_opts);
+                                     *node.mempool, *node.mempool_candidate, peerman_opts);
     validation_signals.RegisterValidationInterface(node.peerman.get());
 
     // ********************************************************* Step 8: start indexers
@@ -1765,8 +1774,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
         // Load mempool from disk
         if (auto* pool{chainman.ActiveChainstate().GetMempool()}) {
-            LoadMempool(*pool, ShouldPersistMempool(args) ? MempoolPath(args) : fs::path{}, chainman.ActiveChainstate(), {});
+            LoadMempool(*pool, ShouldPersistMempool(args) ? MempoolPath(args) : fs::path{}, chainman.ActiveChainstate(), {}, /*raw_tx_candidate=*/false);
             pool->SetLoadTried(!chainman.m_interrupt);
+        }
+
+        if (auto* pool_candidate{chainman.ActiveChainstate().GetMempool(true)}) {
+            LoadMempool(*pool_candidate, MempoolPath(args, true), chainman.ActiveChainstate(), {}, /*raw_tx_candidate=*/true);
+            pool_candidate->SetLoadTried(!chainman.m_interrupt);
         }
     });
 

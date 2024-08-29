@@ -38,7 +38,7 @@ namespace kernel {
 static const uint64_t MEMPOOL_DUMP_VERSION_NO_XOR_KEY{1};
 static const uint64_t MEMPOOL_DUMP_VERSION{2};
 
-bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active_chainstate, ImportMempoolOptions&& opts)
+bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active_chainstate, ImportMempoolOptions&& opts, bool raw_tx_candidate)
 {
     if (load_path.empty()) return false;
 
@@ -98,7 +98,7 @@ bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active
             }
             if (nTime > TicksSinceEpoch<std::chrono::seconds>(now - pool.m_opts.expiry)) {
                 LOCK(cs_main);
-                const auto& accepted = AcceptToMemoryPool(active_chainstate, tx, nTime, /*bypass_limits=*/false, /*test_accept=*/false);
+                const auto& accepted = AcceptToMemoryPool(active_chainstate, tx, nTime, /*bypass_limits=*/false, /*test_accept=*/false, raw_tx_candidate);
                 if (accepted.m_result_type == MempoolAcceptResult::ResultType::VALID) {
                     ++count;
                 } else {

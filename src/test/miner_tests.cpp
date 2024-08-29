@@ -39,7 +39,7 @@ struct MinerTestingSetup : public TestingSetup {
     {
         CCoinsViewMemPool view_mempool{&m_node.chainman->ActiveChainstate().CoinsTip(), tx_mempool};
         CBlockIndex* tip{m_node.chainman->ActiveChain().Tip()};
-        const std::optional<LockPoints> lock_points{CalculateLockPointsAtTip(tip, view_mempool, tx)};
+        const std::optional<LockPoints> lock_points{CalculateLockPointsAtTip(tip, view_mempool, tx, false)};
         return lock_points.has_value() && CheckSequenceLocksAtTip(tip, *lock_points);
     }
     CTxMemPool& MakeMempool()

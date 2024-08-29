@@ -174,6 +174,71 @@ static UniValue generateBlocks(ChainstateManager& chainman, const CTxMemPool& me
     return blockHashes;
 }
 
+static UniValue generateBlocks(ChainstateManager& chainman, const CTxMemPool& mempool, CTxMemPool& mempool_candidate, const CScript& coinbase_script, int nGenerate, uint64_t nMaxTries)
+{
+    UniValue blockHashes(UniValue::VARR);
+    for (auto& [key, value]: mempool_candidate.votemap) {
+        std::cout << "\nInitial Check - Key: "<< key << " Block Count: " << value.block_count << " Vote Count: " << value.vote_count << "\n" << std::endl;
+    }
+    while (nGenerate > 0 && !chainman.m_interrupt) {
+        std::unique_ptr<CBlockTemplate> pblocktemplate(BlockAssembler{chainman.ActiveChainstate(), &mempool}.CreateNewBlock(coinbase_script));
+        if (!pblocktemplate.get())
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't create new block");
+
+        std::shared_ptr<const CBlock> block_out;
+        if (!GenerateBlock(chainman, pblocktemplate->block, nMaxTries, block_out, /*process_new_block=*/true)) {
+            break;
+        }
+
+        if (block_out) {
+            --nGenerate;
+            blockHashes.push_back(block_out->GetHash().GetHex());
+            for (auto& [key, value]: mempool_candidate.votemap) {
+                std::cout << "\n" << key << " " << value.block_count << " " << value.vote_count << std::endl;
+                value.block_count = value.block_count + 1;
+                std::cout << key << " " << value.block_count << " " << value.vote_count << "\n" << std::endl;
+            }
+        }
+    }
+    for (auto& [key, value]: mempool_candidate.votemap) {
+        std::cout << "Final Check - Key: "<< key << " Block Count: " << value.block_count << " Vote Count: " << value.vote_count << "\n" << std::endl;
+    }
+    return blockHashes;
+}
+
+static UniValue generateBlockWithEditTransactionId(ChainstateManager& chainman, const CTxMemPool& mempool, CTxMemPool& mempool_candidate, const CScript& coinbase_script, const CScript& edit_txid_script, int nGenerate, uint64_t nMaxTries)
+{
+    UniValue blockHashes(UniValue::VARR);
+    for (auto& [key, value]: mempool_candidate.votemap) {
+        std::cout << "\nInitial Check - Key: "<< key << " Block Count: " << value.block_count << " Vote Count: " << value.vote_count << "\n" << std::endl;
+    }
+    while (nGenerate > 0 && !chainman.m_interrupt) {
+        std::unique_ptr<CBlockTemplate> pblocktemplate(BlockAssembler{chainman.ActiveChainstate(), &mempool}.CreateNewBlock(coinbase_script, edit_txid_script));
+        if (!pblocktemplate.get())
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't create new block");
+
+        std::shared_ptr<const CBlock> block_out;
+        if (!GenerateBlock(chainman, pblocktemplate->block, nMaxTries, block_out, /*process_new_block=*/true)) {
+            break;
+        }
+
+        if (block_out) {
+            --nGenerate;
+            blockHashes.push_back(block_out->GetHash().GetHex());
+            for (auto& [key, value]: mempool_candidate.votemap) {
+                std::cout << "\n" << key << " " << value.block_count << " " << value.vote_count << std::endl;
+                value.block_count = value.block_count + 1;
+                value.vote_count = value.vote_count + 1;
+                std::cout << key << " " << value.block_count << " " << value.vote_count << "\n" << std::endl;
+            }
+        }
+    }
+    for (auto& [key, value]: mempool_candidate.votemap) {
+        std::cout << "Final Check - Key: "<< key << " Block Count: " << value.block_count << " Vote Count: " << value.vote_count << "\n" << std::endl;
+    }
+    return blockHashes;
+}
+
 static bool getScriptFromDescriptor(const std::string& descriptor, CScript& script, std::string& error)
 {
     FlatSigningProvider key_provider;
@@ -285,11 +350,74 @@ static RPCHelpMan generatetoaddress()
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
     const CTxMemPool& mempool = EnsureMemPool(node);
+    CTxMemPool& mempool_candidate = EnsureMemPoolCandidate(node);
     ChainstateManager& chainman = EnsureChainman(node);
 
     CScript coinbase_script = GetScriptForDestination(destination);
 
-    return generateBlocks(chainman, mempool, coinbase_script, num_blocks, max_tries);
+    return generateBlocks(chainman, mempool, mempool_candidate, coinbase_script, num_blocks, max_tries);
+},
+    };
+}
+
+static RPCHelpMan generatetoaddresswithedittx()
+{
+    return RPCHelpMan{"generatetoaddresswithedittx",
+        "Mine 1 block to a specified address with the given edit transaction and return the block hash.",
+         {
+            {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The address to send the newly generated bitcoin to."},
+            {"hash", RPCArg::Type::STR, RPCArg::Optional::NO, "The hash of the edit transaction to include in the coinbase transaction"},
+            {"maxtries", RPCArg::Type::NUM, RPCArg::Default{DEFAULT_MAX_TRIES}, "How many iterations to try."},
+         },
+         RPCResult{
+            RPCResult::Type::ARR, "", "hashes of blocks generated",
+            {
+                {RPCResult::Type::STR_HEX, "", "blockhash"},
+            }},
+         RPCExamples{
+            "\nGenerate to myaddress\n"
+            + HelpExampleCli("generatetoaddresswithedittx", "myaddress")
+            + "If you are using the " PACKAGE_NAME " wallet, you can get a new address to send the newly generated bitcoin to with:\n"
+            + HelpExampleCli("getnewaddress", "")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const int num_blocks{1};
+    const uint64_t max_tries{request.params[2].isNull() ? DEFAULT_MAX_TRIES : request.params[2].getInt<int>()};
+
+    CTxDestination destination = DecodeDestination(request.params[0].get_str());
+    if (!IsValidDestination(destination)) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
+    }
+
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    const CTxMemPool& mempool = EnsureMemPool(node);
+    CTxMemPool& mempool_candidate = EnsureMemPoolCandidate(node);
+    ChainstateManager& chainman = EnsureChainman(node);
+
+    CScript coinbase_script = GetScriptForDestination(destination);
+
+    uint256 hash = ParseHashV(request.params[1], "parameter 2");
+    const CBlockIndex* blockindex = nullptr;
+
+    if (hash == chainman.GetParams().GenesisBlock().hashMerkleRoot) {
+        // Special exception for the genesis block coinbase transaction
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The genesis block coinbase is not considered an ordinary transaction and cannot be retrieved");
+    }
+
+    uint256 hash_block;
+    const CTransactionRef editTxRef = GetTransaction(blockindex, node.mempool.get(), hash, hash_block, chainman.m_blockman);
+    if (!editTxRef) {
+        std::string errmsg;
+        errmsg = "No such mempool or blockchain transaction";
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, errmsg + ".");
+    }
+
+    std::vector<unsigned char> data = ParseHexV(editTxRef.get()->GetHash().GetHex().c_str(), "Data");
+    CTxDestination nodestination{CNoDestination{CScript() << OP_RETURN << data}};
+    CScript editTxidScriptPubKeyIn = GetScriptForDestination(nodestination);
+
+    return generateBlockWithEditTransactionId(chainman, mempool, mempool_candidate, coinbase_script, editTxidScriptPubKeyIn, num_blocks, max_tries);
 },
     };
 }
@@ -1113,6 +1241,7 @@ void RegisterMiningRPCCommands(CRPCTable& t)
         {"mining", &submitheader},
 
         {"hidden", &generatetoaddress},
+        {"hiddne", &generatetoaddresswithedittx},
         {"hidden", &generatetodescriptor},
         {"hidden", &generateblock},
         {"hidden", &generate},

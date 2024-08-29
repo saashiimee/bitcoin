@@ -35,9 +35,21 @@ CTxMemPool& EnsureMemPool(const NodeContext& node)
     return *node.mempool;
 }
 
-CTxMemPool& EnsureAnyMemPool(const std::any& context)
+CTxMemPool& EnsureMemPoolCandidate(const NodeContext& node)
 {
-    return EnsureMemPool(EnsureAnyNodeContext(context));
+    if (!node.mempool_candidate) {
+        throw JSONRPCError(RPC_CLIENT_MEMPOOL_DISABLED, "Candidate Mempool disabled or instance not found");
+    }
+    return *node.mempool_candidate;
+}
+
+CTxMemPool& EnsureAnyMemPool(const std::any& context, bool mempool_candidate)
+{
+    if (mempool_candidate) {
+        return EnsureMemPoolCandidate(EnsureAnyNodeContext(context));
+    } else {
+        return EnsureMemPool(EnsureAnyNodeContext(context));
+    }
 }
 
 

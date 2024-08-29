@@ -454,6 +454,123 @@ static RPCHelpMan createrawtransaction()
     };
 }
 
+static RPCHelpMan createrawtransactioncandidate()
+{
+    return RPCHelpMan{"createrawtransactioncandidate",
+                "\nCreate a transaction spending the given inputs and creating new outputs.\n",
+                {
+                    {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id"},
+                    {"iswitness", RPCArg::Type::BOOL, RPCArg::DefaultHint{"depends on heuristic tests"}, "Whether the transaction hex is a serialized witness transaction.\n"
+                        "If iswitness is not present, heuristic tests will be used in decoding.\n"
+                        "If true, only witness deserialization will be tried.\n"
+                        "If false, only non-witness deserialization will be tried.\n"
+                        "This boolean should reflect whether the transaction has inputs\n"
+                        "(e.g. fully valid, or on-chain transactions), if known by the caller."
+                    },
+                    {"locktime", RPCArg::Type::NUM, RPCArg::Default{0}, "Raw locktime. Non-0 value also locktime-activates inputs"},
+                    {"replaceable", RPCArg::Type::BOOL, RPCArg::Default{true}, "Marks this transaction as BIP125-replaceable.\n"
+                        "Allows this transaction to be replaced by a transaction with higher fees. If provided, it is an error if explicit sequence numbers are incompatible."},
+                    {"prevtxs", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "The previous dependent transaction outputs",
+                        {
+                            {"", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
+                                {
+                                    {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id"},
+                                    {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "The output number"},
+                                    {"scriptPubKey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "script key"},
+                                    {"redeemScript", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "(required for P2SH) redeem script"},
+                                    {"witnessScript", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "(required for P2WSH or P2SH-P2WSH) witness script"},
+                                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "(required for Segwit inputs) the amount spent"},
+                                },
+                            },
+                        },
+                    },
+                    {"sighashtype", RPCArg::Type::STR, RPCArg::Default{"DEFAULT for Taproot, ALL otherwise"}, "The signature hash type. Must be one of\n"
+            "       \"DEFAULT\"\n"
+            "       \"ALL\"\n"
+            "       \"NONE\"\n"
+            "       \"SINGLE\"\n"
+            "       \"ALL|ANYONECANPAY\"\n"
+            "       \"NONE|ANYONECANPAY\"\n"
+            "       \"SINGLE|ANYONECANPAY\""},
+                },
+                RPCResult{
+                    RPCResult::Type::STR_HEX, "transaction", "hex string of the transaction"
+                },
+                RPCExamples{
+                    HelpExampleCli("createrawtransaction", "\"[{\\\"txid\\\":\\\"myid\\\",\\\"vout\\\":0}]\" \"[{\\\"address\\\":0.01}]\"")
+            + HelpExampleCli("createrawtransaction", "\"[{\\\"txid\\\":\\\"myid\\\",\\\"vout\\\":0}]\" \"[{\\\"data\\\":\\\"00010203\\\"}]\"")
+            + HelpExampleRpc("createrawtransaction", "\"[{\\\"txid\\\":\\\"myid\\\",\\\"vout\\\":0}]\", \"[{\\\"address\\\":0.01}]\"")
+            + HelpExampleRpc("createrawtransaction", "\"[{\\\"txid\\\":\\\"myid\\\",\\\"vout\\\":0}]\", \"[{\\\"data\\\":\\\"00010203\\\"}]\"")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
+
+    uint256 hash = ParseHashV(request.params[0], "parameter 1");
+    const CBlockIndex* blockindex = nullptr;
+
+    if (hash == chainman.GetParams().GenesisBlock().hashMerkleRoot) {
+        // Special exception for the genesis block coinbase transaction
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The genesis block coinbase is not considered an ordinary transaction and cannot be retrieved");
+    }
+
+    bool f_txindex_ready = false;
+    if (g_txindex && !blockindex) {
+        f_txindex_ready = g_txindex->BlockUntilSyncedToCurrentChain();
+    }
+
+    uint256 hash_block;
+    const CTransactionRef txRef = GetTransaction(blockindex, node.mempool.get(), hash, hash_block, chainman.m_blockman);
+    if (!txRef) {
+        std::string errmsg;
+        if (blockindex) {
+            const bool block_has_data = WITH_LOCK(::cs_main, return blockindex->nStatus & BLOCK_HAVE_DATA);
+            if (!block_has_data) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Block not available");
+            }
+            errmsg = "No such transaction found in the provided block";
+        } else if (!g_txindex) {
+            errmsg = "No such mempool transaction. Use -txindex or provide a block hash to enable blockchain transaction queries";
+        } else if (!f_txindex_ready) {
+            errmsg = "No such mempool transaction. Blockchain transactions are still in the process of being indexed";
+        } else {
+            errmsg = "No such mempool or blockchain transaction";
+        }
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, errmsg + ". Use gettransaction for wallet transactions.");
+    }
+
+    CMutableTransaction mtx;
+
+    bool try_witness = request.params[1].isNull() ? true : request.params[1].get_bool();
+    bool try_no_witness = request.params[1].isNull() ? true : !request.params[1].get_bool();
+
+    if (!DecodeHexTx(mtx, EncodeHexTx(*txRef), try_no_witness, try_witness)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    }
+
+    for (unsigned int idx = 0; idx < mtx.vout.size(); idx++) {
+        if (mtx.vout[idx].scriptPubKey.IsUnspendable()) {
+            std::vector<unsigned char> data = ParseHexV("00", "Data");
+            CTxDestination destination{CNoDestination{CScript() << OP_RETURN << data}};
+            CScript newScriptPubKey = GetScriptForDestination(destination);
+            mtx.vout[idx].scriptPubKey = newScriptPubKey;
+        }
+    }
+
+    std::string str = txRef.get()->GetHash().ToString().c_str() + std::__1::string(",") + mtx.GetHash().ToString().c_str();
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("finalhex", HexStr(str).c_str());
+    result.pushKV("candtxhexstr", EncodeHexTx(CTransaction(mtx)));
+    result.pushKV("origintxhash", txRef.get()->GetHash().ToString().c_str());
+    result.pushKV("candtxhash", mtx.GetHash().ToString().c_str());
+    
+    return result;
+},
+    };
+}
+
 static RPCHelpMan decoderawtransaction()
 {
     return RPCHelpMan{"decoderawtransaction",
@@ -2010,6 +2127,7 @@ void RegisterRawTransactionRPCCommands(CRPCTable& t)
     static const CRPCCommand commands[]{
         {"rawtransactions", &getrawtransaction},
         {"rawtransactions", &createrawtransaction},
+        {"rawtransactions", &createrawtransactioncandidate},
         {"rawtransactions", &decoderawtransaction},
         {"rawtransactions", &decodescript},
         {"rawtransactions", &combinerawtransaction},

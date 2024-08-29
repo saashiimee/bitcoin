@@ -83,6 +83,7 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& argsman, const CChainP
 
     if (argsman.GetBoolArg("-datacarrier", DEFAULT_ACCEPT_DATACARRIER)) {
         mempool_opts.max_datacarrier_bytes = argsman.GetIntArg("-datacarriersize", MAX_OP_RETURN_RELAY);
+        printf("mempool_data: %i\n", *mempool_opts.max_datacarrier_bytes);
     } else {
         mempool_opts.max_datacarrier_bytes = std::nullopt;
     }

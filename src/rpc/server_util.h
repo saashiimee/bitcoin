@@ -21,7 +21,8 @@ struct NodeContext;
 
 node::NodeContext& EnsureAnyNodeContext(const std::any& context);
 CTxMemPool& EnsureMemPool(const node::NodeContext& node);
-CTxMemPool& EnsureAnyMemPool(const std::any& context);
+CTxMemPool& EnsureMemPoolCandidate(const node::NodeContext& node);
+CTxMemPool& EnsureAnyMemPool(const std::any& context, bool mempool_candidate = false);
 BanMan& EnsureBanman(const node::NodeContext& node);
 BanMan& EnsureAnyBanman(const std::any& context);
 ArgsManager& EnsureArgsman(const node::NodeContext& node);

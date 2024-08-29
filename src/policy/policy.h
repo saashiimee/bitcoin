@@ -69,13 +69,16 @@ static const bool DEFAULT_ACCEPT_DATACARRIER = true;
  * Default setting for -datacarriersize. 80 bytes of data, +1 for OP_RETURN,
  * +2 for the pushdata opcodes.
  */
-static const unsigned int MAX_OP_RETURN_RELAY = 83;
+static const unsigned int MAX_OP_RETURN_RELAY = 303;
 /**
  * An extra transaction can be added to a package, as long as it only has one
  * ancestor and is no larger than this. Not really any reason to make this
  * configurable as it doesn't materially change DoS parameters.
  */
 static constexpr unsigned int EXTRA_DESCENDANT_TX_SIZE_LIMIT{10000};
+
+static const unsigned int MAX_VOTE_CONSECUTIVE_BLOCK = 20;
+static const unsigned int VOTE_THRESHOLD = 10;
 
 
 /**

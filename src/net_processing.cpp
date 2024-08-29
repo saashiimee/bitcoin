@@ -489,7 +489,7 @@ class PeerManagerImpl final : public PeerManager
 public:
     PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                     BanMan* banman, ChainstateManager& chainman,
-                    CTxMemPool& pool, Options opts);
+                    CTxMemPool& pool, CTxMemPool& pool_candidate, Options opts);
 
     /** Overridden from CValidationInterface. */
     void BlockConnected(ChainstateRole role, const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected) override
@@ -779,6 +779,7 @@ private:
     BanMan* const m_banman;
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
+    CTxMemPool& m_mempool_candidate;
     TxRequestTracker m_txrequest GUARDED_BY(::cs_main);
     std::unique_ptr<TxReconciliationTracker> m_txreconciliation;
 
@@ -2042,14 +2043,14 @@ std::optional<std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, const CBl
 
 std::unique_ptr<PeerManager> PeerManager::make(CConnman& connman, AddrMan& addrman,
                                                BanMan* banman, ChainstateManager& chainman,
-                                               CTxMemPool& pool, Options opts)
+                                               CTxMemPool& pool, CTxMemPool& pool_candidate, Options opts)
 {
-    return std::make_unique<PeerManagerImpl>(connman, addrman, banman, chainman, pool, opts);
+    return std::make_unique<PeerManagerImpl>(connman, addrman, banman, chainman, pool, pool_candidate, opts);
 }
 
 PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                                  BanMan* banman, ChainstateManager& chainman,
-                                 CTxMemPool& pool, Options opts)
+                                 CTxMemPool& pool, CTxMemPool& pool_candidate, Options opts)
     : m_rng{opts.deterministic_rng},
       m_fee_filter_rounder{CFeeRate{DEFAULT_MIN_RELAY_TX_FEE}, m_rng},
       m_chainparams(chainman.GetParams()),
@@ -2058,6 +2059,7 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
       m_banman(banman),
       m_chainman(chainman),
       m_mempool(pool),
+      m_mempool_candidate(pool_candidate),
       m_opts{opts}
 {
     // While Erlay support is incomplete, it must be enabled explicitly via -txreconciliation.

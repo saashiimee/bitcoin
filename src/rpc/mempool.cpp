@@ -11,6 +11,8 @@
 #include <core_io.h>
 #include <kernel/mempool_entry.h>
 #include <node/mempool_persist_args.h>
+#include <node/context.h>
+#include <node/transaction.h>
 #include <node/types.h>
 #include <policy/rbf.h>
 #include <policy/settings.h>
@@ -32,6 +34,7 @@ using kernel::DumpMempool;
 using node::DEFAULT_MAX_BURN_AMOUNT;
 using node::DEFAULT_MAX_RAW_TX_FEE_RATE;
 using node::MempoolPath;
+using node::GetTransaction;
 using node::NodeContext;
 using node::TransactionError;
 using util::ToString;
@@ -99,6 +102,147 @@ static RPCHelpMan sendrawtransaction()
             }
 
             return tx->GetHash().GetHex();
+        },
+    };
+}
+
+static RPCHelpMan sendrawtransactioncandidate()
+{
+    return RPCHelpMan{"sendrawtransactioncandidate",
+        "\nSubmit a raw candidate transaction (serialized, hex-encoded) to local node and network.\n",
+        {
+            {"hexstring", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hex string of the raw transaction"},
+            {"hexstringcandidate", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The hex string of the raw candidate transaction"},
+            {"maxfeerate", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK())},
+             "Reject transactions whose fee rate is higher than the specified value, expressed in " + CURRENCY_UNIT +
+                 "/kvB.\nFee rates larger than 1BTC/kvB are rejected.\nSet to 0 to accept any fee rate."},
+            {"maxburnamount", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_MAX_BURN_AMOUNT)},
+             "Reject transactions with provably unspendable outputs (e.g. 'datacarrier' outputs that use the OP_RETURN opcode) greater than the specified value, expressed in " + CURRENCY_UNIT + ".\n"
+             "If burning funds through unspendable outputs is desired, increase this value.\n"
+             "This check is based on heuristics and does not guarantee spendability of outputs.\n"},
+        },
+        RPCResult{
+            RPCResult::Type::STR_HEX, "", "The transaction hash in hex"
+        },
+        RPCExamples{
+            "\nCreate a transaction\n"
+            + HelpExampleCli("createrawtransaction", "\"[{\\\"txid\\\" : \\\"mytxid\\\",\\\"vout\\\":0}]\" \"{\\\"myaddress\\\":0.01}\"") +
+            "Sign the transaction, and get back the hex\n"
+            + HelpExampleCli("signrawtransactionwithwallet", "\"myhex\"") +
+            "\nSend the transaction (signed hex)\n"
+            + HelpExampleCli("sendrawtransaction", "\"signedhex\"") +
+            "\nAs a JSON-RPC call\n"
+            + HelpExampleRpc("sendrawtransaction", "\"signedhex\"")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            const CAmount max_burn_amount = request.params[3].isNull() ? 0 : AmountFromValue(request.params[2]);
+
+            CMutableTransaction edit_mtx;
+            CMutableTransaction cand_mtx;
+            if (!DecodeHexTx(edit_mtx, request.params[0].get_str())) {
+                throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Edit TX decode failed. Make sure the tx has at least one input.");
+            }
+
+            if (!DecodeHexTx(cand_mtx, request.params[1].get_str())) {
+                throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Candidate TX decode failed. Make sure the tx has at least one input.");
+            }
+
+            printf("\nedit_mtxid: %s\n", edit_mtx.GetHash().GetHex().c_str());
+            printf("cand_mtxid: %s\n", cand_mtx.GetHash().GetHex().c_str());
+
+            std::string tx_ids;
+
+            for (const auto& out : edit_mtx.vout) {
+                if (out.scriptPubKey.IsUnspendable()) {
+                    std::vector<unsigned char> txData(ParseHex(ScriptToAsmStr(out.scriptPubKey).substr(10)));
+                    DataStream ssData(txData);
+                    tx_ids = ssData.str().c_str();
+                }
+                if((out.scriptPubKey.IsUnspendable() || !out.scriptPubKey.HasValidOps()) && out.nValue > max_burn_amount) {
+                    throw JSONRPCTransactionError(TransactionError::MAX_BURN_EXCEEDED);
+                }
+            }
+
+            std::string delimiter = ",";
+            std::string prev_tx_input = tx_ids.substr(0, tx_ids.find(delimiter));
+            std::string cand_tx_input = tx_ids.substr(tx_ids.find(delimiter) + 1, tx_ids.length());
+
+            NodeContext& node = EnsureAnyNodeContext(request.context);
+            ChainstateManager& chainman = EnsureChainman(node);
+
+            const CBlockIndex* blockindex = nullptr;
+            uint256 prev_txid;
+            uint256 cand_txid;
+            ParseHashStr(prev_tx_input.c_str(), prev_txid);
+            ParseHashStr(cand_tx_input.c_str(), cand_txid);
+
+            printf("\nprev_txid: %s\n", prev_txid.ToString().c_str());
+            printf("cand_txid: %s\n", cand_txid.ToString().c_str());
+
+            if (prev_txid == chainman.GetParams().GenesisBlock().hashMerkleRoot || cand_txid == chainman.GetParams().GenesisBlock().hashMerkleRoot) {
+                // Special exception for the genesis block coinbase transaction
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The genesis block coinbase is not considered an ordinary transaction and cannot be retrieved");
+            }
+
+            uint256 hash_block;
+            const CTransactionRef prev_tx = GetTransaction(blockindex, node.mempool.get(), prev_txid, hash_block, chainman.m_blockman);
+            if (!prev_tx) {
+                std::string errmsg;
+                if (blockindex) {
+                    const bool block_has_data = WITH_LOCK(::cs_main, return blockindex->nStatus & BLOCK_HAVE_DATA);
+                    if (!block_has_data) {
+                        throw JSONRPCError(RPC_MISC_ERROR, "Block not available");
+                    }
+                    errmsg = "No such transaction found in the provided block";
+                } else {
+                    errmsg = "Unable to find previous transaction in any mempool or blockchain transactions";
+                }
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, errmsg + ". Use gettransaction for wallet transactions.");
+            }
+
+            printf("\nfound_prex_txid: %s\n\n", prev_tx.get()->GetHash().GetHex().c_str());
+
+            if (std::string(cand_mtx.GetHash().GetHex().c_str()) != std::string(cand_txid.ToString().c_str())) {
+                std::string errmsg;
+                errmsg = "Edit transaction does not contain the given candidate transaction id";
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, errmsg + ".");
+            }
+
+            CTransactionRef edit_tx(MakeTransactionRef(std::move(edit_mtx)));
+            CTransactionRef cand_tx(MakeTransactionRef(std::move(cand_mtx)));
+
+            const CFeeRate max_raw_tx_fee_rate{ParseFeeRate(self.Arg<UniValue>("maxfeerate"))};
+
+            int64_t edit_tx_virtual_size = GetVirtualTransactionSize(*edit_tx);
+            CAmount max_raw_edit_tx_fee = max_raw_tx_fee_rate.GetFee(edit_tx_virtual_size);
+            int64_t cand_tx_virtual_size = GetVirtualTransactionSize(*cand_tx);
+            CAmount max_raw_cand_tx_fee = max_raw_tx_fee_rate.GetFee(cand_tx_virtual_size);
+
+            std::string edit_tx_err_string;
+            AssertLockNotHeld(cs_main);
+            const TransactionError edit_tx_err = BroadcastTransaction(node, edit_tx, edit_tx_err_string, max_raw_edit_tx_fee, /*relay=*/true, /*wait_callback=*/true, /*raw_tx_candidate=*/false);
+            if (TransactionError::OK != edit_tx_err) {
+                throw JSONRPCTransactionError(edit_tx_err, edit_tx_err_string);
+            } else {
+                node.mempool_candidate->votemap[edit_tx->GetHash().GetHex().c_str()] = CTxMemPool::VoteInfo();
+                std::unordered_map<std::string, CTxMemPool::VoteInfo>::iterator itr;
+                for (itr = node.mempool_candidate->votemap.begin(); itr != node.mempool_candidate->votemap.end(); itr++) {
+                    std::cout << itr->first << " " << itr->second.block_count << " " << itr->second.vote_count << " " << itr->second.status << std::endl;
+                }
+            }
+
+            std::string cand_tx_err_string;
+            AssertLockNotHeld(cs_main);
+            const TransactionError cand_tx_err = BroadcastTransaction(node, cand_tx, cand_tx_err_string, max_raw_cand_tx_fee, /*relay=*/true, /*wait_callback=*/true, /*raw_tx_candidate=*/true);
+            if (TransactionError::OK != cand_tx_err) {
+                throw JSONRPCTransactionError(cand_tx_err, cand_tx_err_string);
+            }
+
+            printf("\naccepted_edit_txid: %s\n", edit_tx->GetHash().GetHex().c_str());
+            printf("accepted_cand_txid: %s\n\n", cand_tx->GetHash().GetHex().c_str());
+
+            return edit_tx->GetHash().GetHex();
         },
     };
 }
@@ -420,6 +564,55 @@ static RPCHelpMan getrawmempool()
     }
 
     return MempoolToJSON(EnsureAnyMemPool(request.context), fVerbose, include_mempool_sequence);
+},
+    };
+}
+
+static RPCHelpMan getrawmempoolcandidate()
+{
+    return RPCHelpMan{"getrawmempoolcandidate",
+        "\nReturns all transaction ids in memory pool as a json array of string transaction ids.\n",
+        {
+            {"verbose", RPCArg::Type::BOOL, RPCArg::Default{false}, "True for a json object, false for array of transaction ids"},
+            {"mempool_sequence", RPCArg::Type::BOOL, RPCArg::Default{false}, "If verbose=false, returns a json object with transaction list and mempool sequence number attached."},
+        },
+        {
+            RPCResult{"for verbose = false",
+                RPCResult::Type::ARR, "", "",
+                {
+                    {RPCResult::Type::STR_HEX, "", "The transaction id"},
+                }},
+            RPCResult{"for verbose = true",
+                RPCResult::Type::OBJ_DYN, "", "",
+                {
+                    {RPCResult::Type::OBJ, "transactionid", "", MempoolEntryDescription()},
+                }},
+            RPCResult{"for verbose = false and mempool_sequence = true",
+                RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::ARR, "txids", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "", "The transaction id"},
+                    }},
+                    {RPCResult::Type::NUM, "mempool_sequence", "The mempool sequence value."},
+                }},
+        },
+        RPCExamples{
+            HelpExampleCli("getrawmempoolcandidate", "true")
+            + HelpExampleRpc("getrawmempoolcandidate", "true")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    bool fVerbose = false;
+    if (!request.params[0].isNull())
+        fVerbose = request.params[0].get_bool();
+
+    bool include_mempool_sequence = false;
+    if (!request.params[1].isNull()) {
+        include_mempool_sequence = request.params[1].get_bool();
+    }
+
+    return MempoolToJSON(EnsureAnyMemPool(request.context, true), fVerbose, include_mempool_sequence);
 },
     };
 }
@@ -1018,6 +1211,7 @@ void RegisterMempoolRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"rawtransactions", &sendrawtransaction},
+        {"rawtransactions", &sendrawtransactioncandidate},
         {"rawtransactions", &testmempoolaccept},
         {"blockchain", &getmempoolancestors},
         {"blockchain", &getmempooldescendants},
@@ -1025,6 +1219,7 @@ void RegisterMempoolRPCCommands(CRPCTable& t)
         {"blockchain", &gettxspendingprevout},
         {"blockchain", &getmempoolinfo},
         {"blockchain", &getrawmempool},
+        {"blockchain", &getrawmempoolcandidate},
         {"blockchain", &importmempool},
         {"blockchain", &savemempool},
         {"rawtransactions", &submitpackage},

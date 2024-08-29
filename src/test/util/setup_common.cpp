@@ -322,7 +322,7 @@ TestingSetup::TestingSetup(
     peerman_opts.deterministic_rng = true;
     m_node.peerman = PeerManager::make(*m_node.connman, *m_node.addrman,
                                        m_node.banman.get(), *m_node.chainman,
-                                       *m_node.mempool, peerman_opts);
+                                       *m_node.mempool, *m_node.mempool_candidate, peerman_opts);
 
     {
         CConnman::Options options;

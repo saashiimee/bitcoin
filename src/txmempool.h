@@ -439,6 +439,16 @@ public:
 
     const Options m_opts;
 
+    struct VoteInfo {
+        int64_t block_count;
+        int64_t vote_count;
+        std::string status;
+        VoteInfo() : block_count{0}, vote_count{0}, status{"VOTING"} {};
+    };
+
+    std::unordered_map<std::string, VoteInfo> votemap;
+
+
     /** Create a new CTxMemPool.
      * Sanity checks will be off by default for performance, because otherwise
      * accepting transactions becomes O(N^2) where N is the number of transactions

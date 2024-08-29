@@ -267,7 +267,7 @@ struct PackageMempoolAcceptResult
  * @returns a MempoolAcceptResult indicating whether the transaction was accepted/rejected with reason.
  */
 MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTransactionRef& tx,
-                                       int64_t accept_time, bool bypass_limits, bool test_accept)
+                                       int64_t accept_time, bool bypass_limits, bool test_accept, bool raw_tx_candidate = false)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
 /**
@@ -312,7 +312,8 @@ bool CheckFinalTxAtTip(const CBlockIndex& active_chain_tip, const CTransaction& 
 std::optional<LockPoints> CalculateLockPointsAtTip(
     CBlockIndex* tip,
     const CCoinsView& coins_view,
-    const CTransaction& tx);
+    const CTransaction& tx,
+    bool tx_cand_flag = false);
 
 /**
  * Check if transaction will be BIP68 final in the next block to be created on top of tip.
@@ -499,6 +500,7 @@ protected:
     //! Optional mempool that is kept in sync with the chain.
     //! Only the active chainstate has a mempool.
     CTxMemPool* m_mempool;
+    CTxMemPool* m_mempool_candidate;
 
     //! Manages the UTXO set, which is a reflection of the contents of `m_chain`.
     std::unique_ptr<CoinsViews> m_coins_views;
@@ -531,6 +533,7 @@ public:
 
     explicit Chainstate(
         CTxMemPool* mempool,
+        CTxMemPool* mempool_candidate,
         node::BlockManager& blockman,
         ChainstateManager& chainman,
         std::optional<uint256> from_snapshot_blockhash = std::nullopt);
@@ -608,9 +611,13 @@ public:
     }
 
     //! @returns A pointer to the mempool.
-    CTxMemPool* GetMempool()
+    CTxMemPool* GetMempool(bool raw_tx_candidate = false)
     {
-        return m_mempool;
+        if (raw_tx_candidate) {
+            return m_mempool_candidate;
+        } else {
+            return m_mempool;
+        }
     }
 
     //! @returns A reference to a wrapped view of the in-memory UTXO set that
@@ -1036,7 +1043,7 @@ public:
     //!
     //! @param[in] mempool              The mempool to pass to the chainstate
     //                                  constructor
-    Chainstate& InitializeChainstate(CTxMemPool* mempool) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    Chainstate& InitializeChainstate(CTxMemPool* mempool, CTxMemPool* mempool_candidate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Get all chainstates currently being used.
     std::vector<Chainstate*> GetAll();
@@ -1210,7 +1217,7 @@ public:
      * @param[in]  tx              The transaction to submit for mempool acceptance.
      * @param[in]  test_accept     When true, run validation checks but don't submit to mempool.
      */
-    [[nodiscard]] MempoolAcceptResult ProcessTransaction(const CTransactionRef& tx, bool test_accept=false)
+    [[nodiscard]] MempoolAcceptResult ProcessTransaction(const CTransactionRef& tx, bool test_accept=false, bool raw_tx_candidate = false)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Load the block tree and coins database from disk, initializing state if we're running with -reindex

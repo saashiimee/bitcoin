@@ -31,13 +31,14 @@ static TransactionError HandleATMPError(const TxValidationState& state, std::str
     }
 }
 
-TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef tx, std::string& err_string, const CAmount& max_tx_fee, bool relay, bool wait_callback)
+TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef tx, std::string& err_string, const CAmount& max_tx_fee, bool relay, bool wait_callback, bool raw_tx_candidate)
 {
     // BroadcastTransaction can be called by RPC or by the wallet.
     // chainman, mempool and peerman are initialized before the RPC server and wallet are started
     // and reset after the RPC sever and wallet are stopped.
     assert(node.chainman);
     assert(node.mempool);
+    assert(node.mempool_candidate);
     assert(node.peerman);
 
     std::promise<void> promise;
@@ -58,7 +59,8 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             if (!existingCoin.IsSpent()) return TransactionError::ALREADY_IN_CHAIN;
         }
 
-        if (auto mempool_tx = node.mempool->get(txid); mempool_tx) {
+        if (raw_tx_candidate) {
+            if (auto mempool_tx = node.mempool_candidate->get(txid); mempool_tx) {
             // There's already a transaction in the mempool with this txid. Don't
             // try to submit this transaction to the mempool (since it'll be
             // rejected as a TX_CONFLICT), but do attempt to reannounce the mempool
@@ -67,47 +69,100 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
             // The mempool transaction may have the same or different witness (and
             // wtxid) as this transaction. Use the mempool's wtxid for reannouncement.
             wtxid = mempool_tx->GetWitnessHash();
-        } else {
-            // Transaction is not already in the mempool.
-            if (max_tx_fee > 0) {
-                // First, call ATMP with test_accept and check the fee. If ATMP
-                // fails here, return error immediately.
-                const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ true);
+            } else {
+                // Transaction is not already in the mempool.
+                if (max_tx_fee > 0) {
+                    // First, call ATMP with test_accept and check the fee. If ATMP
+                    // fails here, return error immediately.
+                    const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ true, /*raw_tx_candidate*/ true);
+                    if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+                        return HandleATMPError(result.m_state, err_string);
+                    } else if (result.m_base_fees.value() > max_tx_fee) {
+                        return TransactionError::MAX_FEE_EXCEEDED;
+                    }
+                }
+                // Try to submit the transaction to the mempool.
+                const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ false, /*raw_tx_candidate*/ true);
                 if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
                     return HandleATMPError(result.m_state, err_string);
-                } else if (result.m_base_fees.value() > max_tx_fee) {
-                    return TransactionError::MAX_FEE_EXCEEDED;
+                }
+
+                // Transaction was accepted to the mempool.
+
+                if (relay) {
+                    // the mempool tracks locally submitted transactions to make a
+                    // best-effort of initial broadcast
+                    node.mempool_candidate->AddUnbroadcastTx(txid);
+                }
+
+                if (wait_callback && node.validation_signals) {
+                    // For transactions broadcast from outside the wallet, make sure
+                    // that the wallet has been notified of the transaction before
+                    // continuing.
+                    //
+                    // This prevents a race where a user might call sendrawtransaction
+                    // with a transaction to/from their wallet, immediately call some
+                    // wallet RPC, and get a stale result because callbacks have not
+                    // yet been processed.
+                    node.validation_signals->CallFunctionInValidationInterfaceQueue([&promise] {
+                        promise.set_value();
+                    });
+                    callback_set = true;
                 }
             }
-            // Try to submit the transaction to the mempool.
-            const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ false);
-            if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
-                return HandleATMPError(result.m_state, err_string);
-            }
-
-            // Transaction was accepted to the mempool.
-
-            if (relay) {
-                // the mempool tracks locally submitted transactions to make a
-                // best-effort of initial broadcast
-                node.mempool->AddUnbroadcastTx(txid);
-            }
-
-            if (wait_callback && node.validation_signals) {
-                // For transactions broadcast from outside the wallet, make sure
-                // that the wallet has been notified of the transaction before
-                // continuing.
+        } else {
+            if (auto mempool_tx = node.mempool->get(txid); mempool_tx) {
+                // There's already a transaction in the mempool with this txid. Don't
+                // try to submit this transaction to the mempool (since it'll be
+                // rejected as a TX_CONFLICT), but do attempt to reannounce the mempool
+                // transaction if relay=true.
                 //
-                // This prevents a race where a user might call sendrawtransaction
-                // with a transaction to/from their wallet, immediately call some
-                // wallet RPC, and get a stale result because callbacks have not
-                // yet been processed.
-                node.validation_signals->CallFunctionInValidationInterfaceQueue([&promise] {
-                    promise.set_value();
-                });
-                callback_set = true;
+                // The mempool transaction may have the same or different witness (and
+                // wtxid) as this transaction. Use the mempool's wtxid for reannouncement.
+                wtxid = mempool_tx->GetWitnessHash();
+            } else {
+                // Transaction is not already in the mempool.
+                if (max_tx_fee > 0) {
+                    // First, call ATMP with test_accept and check the fee. If ATMP
+                    // fails here, return error immediately.
+                    const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ true);
+                    if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+                        return HandleATMPError(result.m_state, err_string);
+                    } else if (result.m_base_fees.value() > max_tx_fee) {
+                        return TransactionError::MAX_FEE_EXCEEDED;
+                    }
+                }
+                // Try to submit the transaction to the mempool.
+                const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ false);
+                if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+                    return HandleATMPError(result.m_state, err_string);
+                }
+
+                // Transaction was accepted to the mempool.
+
+                if (relay) {
+                    // the mempool tracks locally submitted transactions to make a
+                    // best-effort of initial broadcast
+                    node.mempool->AddUnbroadcastTx(txid);
+                }
+
+                if (wait_callback && node.validation_signals) {
+                    // For transactions broadcast from outside the wallet, make sure
+                    // that the wallet has been notified of the transaction before
+                    // continuing.
+                    //
+                    // This prevents a race where a user might call sendrawtransaction
+                    // with a transaction to/from their wallet, immediately call some
+                    // wallet RPC, and get a stale result because callbacks have not
+                    // yet been processed.
+                    node.validation_signals->CallFunctionInValidationInterfaceQueue([&promise] {
+                        promise.set_value();
+                    });
+                    callback_set = true;
+                }
             }
         }
+        
     } // cs_main
 
     if (callback_set) {

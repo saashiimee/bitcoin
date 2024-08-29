@@ -8,20 +8,28 @@
 #include <policy/policy.h>
 
 #include <coins.h>
+#include <core_io.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <node/blockstorage.h>
+#include <node/coin.h>
+#include <node/context.h>
+#include <node/types.h>
 #include <policy/feerate.h>
 #include <primitives/transaction.h>
+#include <rpc/server_util.h>
 #include <script/interpreter.h>
 #include <script/script.h>
 #include <script/solver.h>
 #include <serialize.h>
 #include <span.h>
+#include <util/strencodings.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <vector>
+#include <streams.h>
 
 CAmount GetDustThreshold(const CTxOut& txout, const CFeeRate& dustRelayFeeIn)
 {
@@ -83,7 +91,39 @@ bool IsStandard(const CScript& scriptPubKey, const std::optional<unsigned>& max_
         if (m < 1 || m > n)
             return false;
     } else if (whichType == TxoutType::NULL_DATA) {
+        // if (!max_datacarrier_bytes) {
+        //     return false;
+        // }
+        // if (scriptPubKey.size() > *max_datacarrier_bytes) {
+        //     std::__1::string str = ScriptToAsmStr(scriptPubKey).substr(10);
+        //     std::vector<unsigned char> txData(ParseHex(str));
+        //     DataStream ssData(txData);
+        //     printf("\nssData: %s\n", ssData.str().c_str());
+        //     // const NodeContext& node = EnsureAnyNodeContext("");
+        //     // ChainstateManager& chainman = EnsureChainman(node);
+
+        //     // uint256 hash = ParseHashV(request.params[0], "parameter 1");
+        //     // const CBlockIndex* blockindex = nullptr;
+
+        //     // if (hash == chainman.GetParams().GenesisBlock().hashMerkleRoot) {
+        //     //     // Special exception for the genesis block coinbase transaction
+        //     //     return false;
+        //     // }
+
+        //     // bool f_txindex_ready = false;
+        //     // if (g_txindex && !blockindex) {
+        //     //     f_txindex_ready = g_txindex->BlockUntilSyncedToCurrentChain();
+        //     // }
+
+        //     // uint256 hash_block;
+        //     // const CTransactionRef tx = GetTransaction(blockindex, node.mempool.get(), hash, hash_block, chainman.m_blockman);
+        //     // if (!tx) {
+        //     //     return false;
+        //     // }
+        // }
         if (!max_datacarrier_bytes || scriptPubKey.size() > *max_datacarrier_bytes) {
+            printf("script_size: %i\n", scriptPubKey.size());
+            printf("max_data: %i\n", *max_datacarrier_bytes);
             return false;
         }
     }
